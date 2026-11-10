@@ -13,6 +13,12 @@ catch
 end
 param(req, k) = HTTP.getparams(req)[k]
 
+# ?pagina=1&por_pagina=20 (máximo 100); valor não numérico vira 400 via ArgumentError
+function paginacao(req)
+    q = HTTP.queryparams(HTTP.URI(req.target))
+    (max(1, parse(Int, get(q, "pagina", "1"))), clamp(parse(Int, get(q, "por_pagina", "20")), 1, 100))
+end
+
 function rota(f)
     function (req)
         try
@@ -56,11 +62,8 @@ function registrar_rotas()
         HTTP.Response(200, ["Content-Type" => "image/svg+xml"], grafico_svg(df, "Histórico de $id"))
     end)
 
-    reg("GET", "/api/sugestoes-alertas", _ -> json(ver_sugestoes_e_alertas(DB[])))
-
-    reg("GET", "/api/ajustes", _ -> json(linhas(consulta(DB[], """
-        SELECT a.*, p.nome FROM ajustes_preco a JOIN produtos p ON p.id = a.produto_id
-        ORDER BY a.criado_em DESC, a.id DESC LIMIT 300"""))))
+    reg("GET", "/api/sugestoes-alertas", req -> json(ver_sugestoes_e_alertas(DB[], paginacao(req)...)))
+    reg("GET", "/api/ajustes", req -> json(listar_ajustes(DB[], paginacao(req)...)))
 
     reg("POST", "/api/ajustes/{id}/aprovar", req -> json(revisar_ajustes(DB[], parse(Int, param(req, "id")), :aprovar)))
     reg("POST", "/api/ajustes/{id}/reverter", req -> json(revisar_ajustes(DB[], parse(Int, param(req, "id")), :reverter)))

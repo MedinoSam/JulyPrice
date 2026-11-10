@@ -1,7 +1,7 @@
 # JulyPrice
 
 Plataforma de precificação dinâmica e gestão reativa de catálogo.
-Core em Julia 1.10 (DataFrames.jl, JuMP.jl + HiGHS, Plots.jl, HTTP.jl), banco PostgreSQL e frontend Vue 3.
+Core em Julia 1.10 (DataFrames.jl, JuMP.jl + HiGHS + Ipopt, Plots.jl, HTTP.jl), banco PostgreSQL e frontend Vue 3.
 
 ## Estrutura
 
@@ -11,6 +11,7 @@ docker-compose.yml                 PostgreSQL 16 na porta 5433
 backend/                           pacote Julia CoreSistemaInteligente
   src/Modelos.jl                   Produto, RegraNegocio, LimitePreco, Alerta, Estado, ResultadoAnalise
   src/MotorPrecificacao.jl         avaliar_risco, detectar_inatividade, avaliar_elasticidade (JuMP),
+                                   otimizar_preco (JuMP + Ipopt),
                                    calcular_preco, aplicar_clamp, disparar_alerta, calcularNovoPreco, executar_ciclo
   src/Repositorio.jl               Interface ERP, gestão de regras/limites/ajustes (LibPQ)
   src/Api.jl                       endpoints HTTP/REST + gráfico (Plots.jl)
@@ -71,6 +72,19 @@ Variáveis: `JULYPRICE_DATABASE_URL` (padrão `postgresql://julyprice:julyprice@
 
 ## Problemas comuns
 
+### `MethodError: no method matching StyledStrings...AnnotatedChar` no Julia 1.11+
+
+O `Manifest.toml` foi resolvido no Julia 1.10, em que `StyledStrings` é um pacote comum. A partir do 1.11 ele
+faz parte do próprio Julia, e a versão antiga do pacote quebra o `REPL` ao carregar. O projeto traz um
+`backend/Manifest-v1.13.toml`, que o Julia 1.13 usa no lugar do `Manifest.toml`. Em outra versão (1.11, 1.12),
+crie o manifest dela uma vez, trocando `1.12` pela sua versão:
+
+```bash
+cd backend && rm -f Manifest-v1.12.toml && mv Manifest.toml Manifest.toml.bak && julia --project=. -e 'using Pkg; Pkg.instantiate()' && mv Manifest.toml Manifest-v1.12.toml && mv Manifest.toml.bak Manifest.toml
+```
+
+Ou rode com o Julia 1.10: `julia +1.10 --project=backend backend/server.jl`.
+
 ### `missing "=" after "jdbc:mysql://..." in connection info string`
 
 ```
@@ -107,8 +121,8 @@ export JULYPRICE_DATABASE_URL=postgresql://julyprice:julyprice@localhost:5433/ju
 ## Máquina de estados (`calcularNovoPreco`)
 
 ```
-EmAnalise ─┬─ estoque < limite_estoque_minimo          → AvaliadoRuptura (+taxa_ajuste_alto, 5%)
-           ├─ dias_parado > limite_dias_inatividade    → AvaliadoEncalhe (−taxa_ajuste_baixo, 10%)
+EmAnalise ─┬─ estoque < limite_estoque_minimo          → AvaliadoRuptura (sobe até taxa_ajuste_alto, 5%)
+           ├─ dias_parado > limite_dias_inatividade    → AvaliadoEncalhe (desce até taxa_ajuste_baixo, 10%)
            └─ normal                                   → AvaliadoNormal (mantém)
         → ValidadoClamp: preço ∈ [max(preco_minimo, custo·(1+margem)), preco_maximo]
         → risco ≠ normal: NotificadoGerente (alerta; aguarda aprovar/descartar)
@@ -116,8 +130,16 @@ EmAnalise ─┬─ estoque < limite_estoque_minimo          → AvaliadoRuptura
 ```
 
 Ruptura tem prioridade sobre encalhe. Se o piso de margem passar do teto, vale o teto.
-Elasticidade: regressão log-log `log q = a + b·log p` resolvida com JuMP/HiGHS, restrita a `b ≤ 0`;
-entra no alerta como variação de demanda esperada. Produto com revisão pendente não é reavaliado.
+Elasticidade: regressão log-log `log q = a + b·log p` resolvida com JuMP/HiGHS, restrita a `b ≤ 0`.
+Produto com revisão pendente não é reavaliado.
+
+Preço (`otimizar_preco`, JuMP + Ipopt): a regra define a direção e o passo máximo; a otimização escolhe
+o ponto da faixa com a demanda prevista pela elasticidade `e`, `q(x) = q0·(x/p0)^e`.
+
+- Ruptura: `x ∈ [p, p·(1+taxa_ajuste_alto)]`, maximiza o lucro `(x − custo)·q(x)`. Demanda elástica com
+  markup alto pode manter o preço (pela regra de Lerner o ótimo é `custo·e/(1+e)`).
+- Encalhe: `x ∈ [p·(1−taxa_ajuste_baixo), p]`, maximiza a receita `x·q(x)`, porque o custo do estoque parado
+  já foi pago. Só baixa se a demanda for elástica (`e < −1`); inelástica mantém o preço e o alerta avisa.
 
 ## Endpoints
 
@@ -128,12 +150,14 @@ entra no alerta como variação de demanda esperada. Produto com revisão penden
 | GET | `/api/produtos` | catálogo com limites e flag de pendência |
 | PUT | `/api/produtos/{id}/limites` | gerente define `preco_minimo`, `preco_maximo`, `margem_desejada` |
 | GET | `/api/produtos/{id}/grafico.svg` | histórico vendas × preço (Plots.jl) |
-| GET | `/api/sugestoes-alertas` | ajustes pendentes e alertas não lidos |
-| GET | `/api/ajustes` | histórico de ajustes |
+| GET | `/api/sugestoes-alertas?pagina=1&por_pagina=20` | ajustes pendentes com o alerta de cada um (paginado) |
+| GET | `/api/ajustes?pagina=1&por_pagina=20` | histórico de ajustes (paginado; `revertivel` indica o que pode ser revertido) |
 | POST | `/api/ajustes/{id}/aprovar` | aprova sugestão pendente |
 | POST | `/api/ajustes/{id}/reverter` | descarta pendente ou reverte o último finalizado do produto |
 | GET/PUT | `/api/regras` | administrador lê/atualiza regras globais |
 | POST | `/api/motor/executar` | roda o ciclo agora |
+
+Listagens paginadas respondem `{"itens": [...], "total": N, "pagina": P, "por_pagina": K}`; `por_pagina` vai de 1 a 100 (padrão 20).
 
 Exemplo de carga do ERP:
 
@@ -147,6 +171,6 @@ Exemplo de carga do ERP:
 
 ## Decisões
 
-- `custo` foi adicionado ao Produto: a margem desejada precisa de uma base.
+- `custo` foi adicionado ao Produto: a margem desejada e o lucro da otimização precisam de uma base.
 - Administrador e Gerente Comercial são os dois painéis do frontend; não há login.
 - O preço vindo do ERP só vale para produto novo; depois a plataforma é dona do preço.

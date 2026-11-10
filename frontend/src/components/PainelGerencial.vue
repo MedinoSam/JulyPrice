@@ -1,32 +1,41 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { api, brl, pct, dataHora } from '../api.js'
+import Paginacao from './Paginacao.vue'
 
 const produtos = ref([])
-const sugestoes = ref([])
-const alertas = ref([])
-const ajustes = ref([])
+const vazia = { itens: [], total: 0, pagina: 1, por_pagina: 20 }
+const sugestoes = ref(vazia)
+const ajustes = ref(vazia)
 const filtro = ref('')
 const selecionado = ref(null)
 const limites = ref(null)
 const erro = ref('')
 const msg = ref('')
 
-const alertaPorAjuste = computed(() => Object.fromEntries(alertas.value.map((a) => [a.ajuste_id, a])))
 const produtosFiltrados = computed(() => {
   const f = filtro.value.toLowerCase()
   return produtos.value.filter((p) => !f || `${p.id} ${p.nome} ${p.categoria}`.toLowerCase().includes(f))
 })
 
+// Busca uma página; se ela ficou vazia (ex.: último item aprovado), volta uma página.
+async function buscarPagina(url, pagina) {
+  const r = await api.get(`${url}?pagina=${pagina}`)
+  return r.itens.length || pagina <= 1 ? r : buscarPagina(url, pagina - 1)
+}
+
+async function irSugestoes(pagina) {
+  try { sugestoes.value = await buscarPagina('/api/sugestoes-alertas', pagina) } catch (e) { erro.value = e.message }
+}
+
+async function irAjustes(pagina) {
+  try { ajustes.value = await buscarPagina('/api/ajustes', pagina) } catch (e) { erro.value = e.message }
+}
+
 async function carregar() {
   erro.value = ''
-  try {
-    const [p, sa, aj] = await Promise.all([api.get('/api/produtos'), api.get('/api/sugestoes-alertas'), api.get('/api/ajustes')])
-    produtos.value = p
-    sugestoes.value = sa.sugestoes
-    alertas.value = sa.alertas
-    ajustes.value = aj
-  } catch (e) { erro.value = e.message }
+  try { produtos.value = await api.get('/api/produtos') } catch (e) { erro.value = e.message }
+  await Promise.all([irSugestoes(sugestoes.value.pagina), irAjustes(ajustes.value.pagina)])
 }
 
 async function revisar(id, acao) {
@@ -59,13 +68,6 @@ async function salvarLimites() {
   } catch (e) { erro.value = e.message }
 }
 
-const ultimoFinalizado = computed(() => {
-  // só o ajuste finalizado mais recente de cada produto pode ser revertido
-  const m = {}
-  for (const a of ajustes.value) if (a.estado === 'Finalizado' && !(a.produto_id in m)) m[a.produto_id] = a.id
-  return new Set(Object.values(m))
-})
-
 onMounted(carregar)
 </script>
 
@@ -75,20 +77,20 @@ onMounted(carregar)
 
   <section class="card">
     <div class="cab">
-      <h2>Sugestões aguardando revisão <span class="contador">{{ sugestoes.length }}</span></h2>
+      <h2>Sugestões aguardando revisão <span class="contador">{{ sugestoes.total }}</span></h2>
       <button @click="carregar">Atualizar</button>
     </div>
-    <p v-if="!sugestoes.length" class="vazio">Nenhum ajuste pendente.</p>
+    <p v-if="!sugestoes.total" class="vazio">Nenhum ajuste pendente.</p>
     <div v-else class="rolagem">
       <table>
         <thead><tr><th>Produto</th><th>Risco</th><th>Preço atual</th><th>Sugerido</th><th>Alerta</th><th></th></tr></thead>
         <tbody>
-          <tr v-for="s in sugestoes" :key="s.id">
+          <tr v-for="s in sugestoes.itens" :key="s.id">
             <td><b>{{ s.produto_id }}</b><br /><small>{{ s.nome }}</small></td>
             <td><span :class="['tag', s.risco]">{{ s.risco }}</span></td>
             <td>{{ brl(s.preco_anterior) }}</td>
             <td>{{ brl(s.preco_novo) }} <small>({{ pct(s.preco_novo / s.preco_anterior - 1) }})</small></td>
-            <td class="mensagem">{{ alertaPorAjuste[s.id]?.mensagem }}</td>
+            <td class="mensagem">{{ s.alerta_mensagem }}</td>
             <td class="botoes">
               <button class="primario" @click="revisar(s.id, 'aprovar')">Aprovar</button>
               <button @click="revisar(s.id, 'reverter')">Descartar</button>
@@ -96,6 +98,7 @@ onMounted(carregar)
           </tr>
         </tbody>
       </table>
+      <Paginacao :pagina="sugestoes" @ir="irSugestoes" />
     </div>
   </section>
 
@@ -144,13 +147,13 @@ onMounted(carregar)
   </section>
 
   <section class="card">
-    <h2>Histórico de ajustes</h2>
-    <p v-if="!ajustes.length" class="vazio">Nenhum ajuste ainda. Rode o motor no Painel Administrativo.</p>
+    <h2>Histórico de ajustes <span class="contador">{{ ajustes.total }}</span></h2>
+    <p v-if="!ajustes.total" class="vazio">Nenhum ajuste ainda. Rode o motor no Painel Administrativo.</p>
     <div v-else class="rolagem">
       <table>
         <thead><tr><th>#</th><th>Data</th><th>Produto</th><th>Risco</th><th>De</th><th>Para</th><th>Estado</th><th></th></tr></thead>
         <tbody>
-          <tr v-for="a in ajustes" :key="a.id">
+          <tr v-for="a in ajustes.itens" :key="a.id">
             <td>{{ a.id }}</td>
             <td>{{ dataHora(a.criado_em) }}</td>
             <td>{{ a.produto_id }}</td>
@@ -158,10 +161,11 @@ onMounted(carregar)
             <td>{{ brl(a.preco_anterior) }}</td>
             <td>{{ brl(a.preco_novo) }}</td>
             <td>{{ a.estado }}</td>
-            <td><button v-if="ultimoFinalizado.has(a.id)" @click="revisar(a.id, 'reverter')">Reverter</button></td>
+            <td><button v-if="a.revertivel" @click="revisar(a.id, 'reverter')">Reverter</button></td>
           </tr>
         </tbody>
       </table>
+      <Paginacao :pagina="ajustes" @ir="irAjustes" />
     </div>
   </section>
 </template>

@@ -37,10 +37,39 @@ function avaliar_elasticidade(p::Produto, historico)
     estimar_elasticidade(h.preco, h.quantidade; padrao=p.elasticidade)
 end
 
+"""
+Escolhe, via JuMP + Ipopt, o preço `x` em `[lo, hi]` que maximiza o resultado esperado
+`(x - custo) · (x / p0)^e`, com a demanda prevista pela elasticidade `e` (a demanda atual é uma
+constante e não muda o ponto ótimo). Com `custo = 0` o objetivo vira receita.
+Sem solução, devolve `padrao`.
+"""
+function otimizar_preco(p0, custo, e, lo, hi; padrao=hi)
+    lo >= hi && return lo
+    # custo 0 e elasticidade -1: receita igual em toda a faixa; qualquer preço serve, vale o padrão
+    iszero(custo) && e == -1 && return padrao
+    m = Model(Ipopt.Optimizer)
+    set_silent(m)
+    @variable(m, lo <= x <= hi, start = padrao)
+    @objective(m, Max, (x - custo) * (x / p0)^e)
+    optimize!(m)
+    is_solved_and_feasible(m) ? clamp(value(x), lo, hi) : padrao
+end
+
+"""
+A regra define a direção e o passo máximo; a otimização escolhe o ponto dentro dessa faixa.
+- Ruptura: faixa [preço, preço·(1 + taxa_ajuste_alto)], maximiza o lucro `(x - custo)·q(x)`.
+- Encalhe: faixa [preço·(1 - taxa_ajuste_baixo), preço], maximiza a receita `x·q(x)`:
+  o custo do estoque parado já foi pago, então só vale baixar se a demanda for elástica.
+- Normal: mantém o preço.
+"""
 function calcular_preco(p::Produto, r::RegraNegocio, risco::Symbol=avaliar_risco(p, r))
-    risco == :ruptura && return p.preco * (1 + r.taxa_ajuste_alto)
-    risco == :encalhe && return p.preco * (1 - r.taxa_ajuste_baixo)
-    p.preco
+    risco == :normal && return p.preco
+    if risco == :ruptura
+        lo, hi = p.preco, p.preco * (1 + r.taxa_ajuste_alto)
+        return otimizar_preco(p.preco, p.custo, p.elasticidade, lo, hi; padrao=hi)
+    end
+    lo, hi = p.preco * (1 - r.taxa_ajuste_baixo), p.preco
+    otimizar_preco(p.preco, 0.0, p.elasticidade, lo, hi; padrao=lo)
 end
 
 # Clamp: piso = max(preço mínimo, custo + margem); teto = preço máximo.
@@ -59,6 +88,7 @@ function disparar_alerta(p::Produto, risco::Symbol, preco_novo::Float64)
     motivo = risco == :ruptura ? "Estoque baixo ($(p.estoque) un.)" : "Sem vendas há $(p.dias_parado) dias"
     msg = @sprintf("%s. Preço sugerido R\$ %.2f → R\$ %.2f (%s); demanda estimada %s (elasticidade %.2f).",
                    motivo, p.preco, preco_novo, pct(dp), pct(dq), p.elasticidade)
+    preco_novo == p.preco && (msg *= " Mudar o preço não melhora o resultado esperado.")
     Alerta(risco == :ruptura ? "RUPTURA" : "ENCALHE", msg, now())
 end
 

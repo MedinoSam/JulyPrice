@@ -62,3 +62,7 @@ td.botoes { white-space: nowrap; display: flex; gap: 6px; }
 .erro { background: #fee2e2; color: #7f1d1d; padding: 8px 12px; border-radius: 6px; }
 .vazio { color: var(--suave); }
 .resumo { margin-top: 12px; }
+
+.paginacao { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end; margin-top: 10px; font-size: .85rem; color: var(--suave); }
+.paginacao span { margin: 0 6px; }
+button:disabled { opacity: .45; cursor: default; filter: none; }

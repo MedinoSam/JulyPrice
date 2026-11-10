@@ -60,11 +60,27 @@ function definir_limites(conn, produto_id::String, l::LimitePreco)
     l
 end
 
-ver_sugestoes_e_alertas(conn) = (
-    sugestoes=linhas(consulta(conn, """SELECT a.*, p.nome FROM ajustes_preco a JOIN produtos p ON p.id = a.produto_id
-                                       WHERE a.estado = 'NotificadoGerente' ORDER BY a.criado_em DESC""")),
-    alertas=linhas(consulta(conn, """SELECT al.*, p.nome FROM alertas al JOIN produtos p ON p.id = al.produto_id
-                                     WHERE NOT al.lido ORDER BY al.data_criacao DESC LIMIT 200""")))
+# Página de `sql` (que já traz ORDER BY). `pagina` e `por_pagina` chegam validados como Int.
+function paginar(conn, sql, pagina::Int, por_pagina::Int)
+    total = only(consulta(conn, "SELECT count(*) AS n FROM ($sql) t").n)
+    itens = linhas(consulta(conn, "$sql LIMIT $por_pagina OFFSET $((pagina - 1) * por_pagina)"))
+    (itens=itens, total=total, pagina=pagina, por_pagina=por_pagina)
+end
+
+# Sugestões pendentes, cada uma com o alerta que a gerou.
+ver_sugestoes_e_alertas(conn, pagina::Int, por_pagina::Int) = paginar(conn, """
+    SELECT a.*, p.nome, al.tipo AS alerta_tipo, al.mensagem AS alerta_mensagem
+    FROM ajustes_preco a JOIN produtos p ON p.id = a.produto_id
+    LEFT JOIN alertas al ON al.ajuste_id = a.id
+    WHERE a.estado = 'NotificadoGerente' ORDER BY a.criado_em DESC, a.id DESC""", pagina, por_pagina)
+
+# `revertivel`: só o ajuste finalizado mais recente de cada produto pode ser revertido.
+listar_ajustes(conn, pagina::Int, por_pagina::Int) = paginar(conn, """
+    SELECT a.*, p.nome,
+           (a.estado = 'Finalizado' AND NOT EXISTS (SELECT 1 FROM ajustes_preco b WHERE b.produto_id = a.produto_id
+                                                    AND b.id > a.id AND b.estado = 'Finalizado')) AS revertivel
+    FROM ajustes_preco a JOIN produtos p ON p.id = a.produto_id
+    ORDER BY a.criado_em DESC, a.id DESC""", pagina, por_pagina)
 
 """
 `acao = :aprovar` — ajuste pendente vira Finalizado e o preço é enviado ao ERP.

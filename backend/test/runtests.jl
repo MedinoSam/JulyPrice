@@ -33,6 +33,21 @@ end
     @test aplicar_clamp(50.0, mk(custo=100.0), LimitePreco(1.0, 110.0, 0.5)) == 110.0
 end
 
+@testset "otimização de preço (JuMP + Ipopt)" begin
+    # Regra de Lerner: com e < -1 o lucro máximo fica em custo·e/(1+e); com e ≥ -1 o lucro cresce com o preço
+    lerner(c, e, lo, hi) = e < -1 ? clamp(c * e / (1 + e), lo, hi) : hi
+    for (c, e, lo, hi) in [(50.0, -3.0, 60.0, 120.0), (50.0, -0.5, 100.0, 105.0), (40.0, -2.0, 70.0, 75.0), (10.0, -1.2, 20.0, 90.0)]
+        @test isapprox(otimizar_preco(100.0, c, e, lo, hi), lerner(c, e, lo, hi); atol=0.01)
+    end
+    @test otimizar_preco(100.0, 0.0, -1.0, 90.0, 100.0; padrao=90.0) == 90.0  # receita plana: vale o padrão
+
+    elastico = Produto("E", "e", 50.0, 100.0, 5, 0, -3.0)    # ótimo 75 < 100: subir derrubaria o lucro
+    @test calcularNovoPreco(elastico, R).preco_novo == 100.0
+    inelastico = Produto("I", "i", 50.0, 100.0, 50, 45, -0.5)  # encalhe inelástico: baixar não aumenta a receita
+    r = calcularNovoPreco(inelastico, R)
+    @test r.preco_novo == 100.0 && occursin("não melhora", r.alerta.mensagem)
+end
+
 @testset "elasticidade (JuMP)" begin
     rng = MersenneTwister(1)
     precos = 100 .* (1 .+ 0.2 .* (rand(rng, 200) .- 0.5))
