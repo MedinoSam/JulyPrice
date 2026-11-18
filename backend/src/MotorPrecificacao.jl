@@ -32,23 +32,26 @@ end
 
 # `historico`: data, quantidade, preco. Os últimos `dias_parado` dias refletem encalhe, não preço, e ficam de fora.
 # O ERP pode omitir dias sem venda: o corte é por data (nunca antes da última venda) e o calendário é
-# completado com venda zero ao último preço conhecido.
+# completado com venda zero ao último preço conhecido. Com a coluna opcional `estoque`, dia com estoque zero
+# fica de fora: a venda zero ali é falta de produto (demanda censurada), não efeito do preço.
 function avaliar_elasticidade(p::Produto, historico)
     h = sort(historico, :data)
     ultima = findlast(>(0), h.quantidade)
     ultima === nothing && return p.elasticidade
     dias = collect(h.data[1]:Day(1):max(h.data[ultima], h.data[end] - Day(p.dias_parado)))
-    precos, qtds = similar(dias, Float64), zeros(Int, length(dias))
+    precos, qtds, esgotado = similar(dias, Float64), zeros(Int, length(dias)), falses(length(dias))
+    tem_estoque = hasproperty(h, :estoque)
     j = 1
     for (i, d) in enumerate(dias)
         if h.data[j] == d
             precos[i], qtds[i] = h.preco[j], h.quantidade[j]
+            esgotado[i] = tem_estoque && coalesce(h.estoque[j] == 0, false)
             j += 1
         else
             precos[i] = precos[i-1]  # dia 1 sempre existe no histórico
         end
     end
-    estimar_elasticidade(precos, qtds; padrao=p.elasticidade)
+    estimar_elasticidade(precos[.!esgotado], qtds[.!esgotado]; padrao=p.elasticidade)
 end
 
 """
@@ -94,6 +97,25 @@ function aplicar_clamp(preco::Float64, p::Produto, l::LimitePreco)
     round(clamp(preco, lo, hi); digits=2)
 end
 
+"""
+Limite de variação acumulada: o preço fica em `ref·(1 ± v)`, com `ref` o preço no início da janela.
+A faixa sempre inclui o preço atual (a trava impede o motor de ir além, não força o preço a voltar) e não sai
+dos limites do gerente. `v = 0` desliga.
+"""
+function limitar_variacao(l::LimitePreco, ref::Float64, preco::Float64, v::Float64)
+    v > 0 || return l
+    lo, hi = min(ref * (1 - v), preco), max(ref * (1 + v), preco)
+    LimitePreco(clamp(lo, l.preco_minimo, l.preco_maximo), clamp(hi, l.preco_minimo, l.preco_maximo), l.margem_desejada)
+end
+
+# Produto sem limites do gerente: teto em `preco_base·(1 + teto)`, sem forçar a queda de um preço já acima. 0 desliga.
+limite_padrao(preco_base::Float64, preco::Float64, teto::Float64) =
+    teto > 0 ? LimitePreco(SEM_LIMITE.preco_minimo, max(preco_base * (1 + teto), preco), 0.0) : SEM_LIMITE
+
+# Sugestão até `variacao` distante de uma descartada há pouco não volta ao gerente.
+em_cooldown(preco_novo::Float64, preco_descartado::Float64, variacao::Float64) =
+    abs(preco_novo / preco_descartado - 1) <= variacao
+
 pct(x) = @sprintf("%+.1f%%", 100x)
 
 function disparar_alerta(p::Produto, risco::Symbol, preco_novo::Float64)
@@ -129,19 +151,25 @@ end
 
 """
 Ciclo completo sobre DataFrames.
-`produtos`: id, nome, custo, preco, estoque, dias_parado, elasticidade
-`vendas`:   produto_id, data, quantidade, preco
+`produtos`: id, nome, custo, preco, estoque, dias_parado, elasticidade [, categoria]
+`vendas`:   produto_id, data, quantidade, preco [, estoque]
+`regras_categoria` troca a regra global pela da categoria do produto. `referencias` (preço no início da
+janela) e `variacao_janela` limitam a variação acumulada (ver `limitar_variacao`).
 Retorna um DataFrame com um resultado por produto.
 """
 function executar_ciclo(produtos::DataFrame, vendas::DataFrame, regra::RegraNegocio,
-                        limites::Dict{String,LimitePreco}=Dict{String,LimitePreco}())
+                        limites::Dict{String,LimitePreco}=Dict{String,LimitePreco}();
+                        regras_categoria::Dict{String,RegraNegocio}=Dict{String,RegraNegocio}(),
+                        referencias::Dict{String,Float64}=Dict{String,Float64}(), variacao_janela::Float64=0.0)
     isempty(produtos) && return DataFrame()
     historico = Dict(String(k.produto_id) => g for (k, g) in pairs(groupby(vendas, :produto_id)))
     DataFrame(map(eachrow(produtos)) do r
         p = Produto(r.id, r.nome, r.custo, r.preco, r.estoque, r.dias_parado, r.elasticidade)
         h = get(historico, p.id, nothing)
         h === nothing || (p.elasticidade = avaliar_elasticidade(p, h))
-        res = calcularNovoPreco(p, regra, get(limites, p.id, SEM_LIMITE))
+        regra_p = hasproperty(r, :categoria) ? get(regras_categoria, r.categoria, regra) : regra
+        l = limitar_variacao(get(limites, p.id, SEM_LIMITE), get(referencias, p.id, p.preco), p.preco, variacao_janela)
+        res = calcularNovoPreco(p, regra_p, l)
         (produto_id=p.id, risco=res.risco, estado_final=res.estados[end],
          preco_anterior=res.preco_anterior, preco_calculado=res.preco_calculado,
          preco_novo=res.preco_novo, elasticidade=p.elasticidade,

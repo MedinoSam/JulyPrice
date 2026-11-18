@@ -97,3 +97,61 @@ end
     @test campo(Dict{Symbol,Any}(), :c, String, "") == ""
     @test_throws ErroCliente campo(Dict(:c => 3), :c, String, "")
 end
+
+@testset "teto padrão e variação acumulada" begin
+    l = LimitePreco(50.0, 200.0, 0.0)
+    # janela de ±15% sobre 100: faixa [85, 115] dentro dos limites do gerente
+    v = limitar_variacao(l, 100.0, 100.0, 0.15)
+    @test v.preco_minimo ≈ 85.0 && v.preco_maximo ≈ 115.0
+    @test limitar_variacao(l, 100.0, 100.0, 0.0) === l                       # 0 desliga
+    @test limitar_variacao(l, 100.0, 130.0, 0.15).preco_maximo == 130.0      # não força a queda do preço atual
+    @test limitar_variacao(LimitePreco(90.0, 110.0, 0.0), 100.0, 100.0, 0.5).preco_maximo == 110.0  # gerente manda
+    @test limite_padrao(100.0, 100.0, 0.3).preco_maximo ≈ 130.0
+    @test limite_padrao(100.0, 150.0, 0.3).preco_maximo == 150.0
+    @test limite_padrao(100.0, 100.0, 0.0) === SEM_LIMITE
+    # rupturas seguidas: com a trava, o preço para em ref·1,15 em vez de subir 5% a cada ciclo
+    p, ref = 100.0, 100.0
+    for _ in 1:10
+        p = calcularNovoPreco(mk(estoque=5, preco=p), R, limitar_variacao(SEM_LIMITE, ref, p, 0.15)).preco_novo
+    end
+    @test p ≈ 115.0
+end
+
+@testset "cooldown de descarte" begin
+    @test em_cooldown(105.0, 105.0, 0.05)
+    @test em_cooldown(108.0, 105.0, 0.05)
+    @test !em_cooldown(112.0, 105.0, 0.05)
+end
+
+@testset "regras por categoria" begin
+    produtos = DataFrame(id=["A", "B"], nome=["a", "b"], categoria=["Livros", "Moda"], custo=[5.0, 5.0],
+                         preco=[10.0, 10.0], estoque=[15, 15], dias_parado=[0, 0], elasticidade=[-1.0, -1.0])
+    vazio = DataFrame(produto_id=String[], data=Date[], quantidade=Int[], preco=Float64[])
+    cats = Dict("Livros" => RegraNegocio(20, 30, 0.05, 0.10))  # Livros: ruptura abaixo de 20 un.
+    res = executar_ciclo(produtos, vazio, R; regras_categoria=cats)
+    @test res.risco == [:ruptura, :normal]
+end
+
+@testset "elasticidade ignora dias esgotados" begin
+    datas = Date(2026, 1, 1) .+ Day.(0:59)
+    precos = repeat([80.0, 100.0, 120.0]; inner=5, outer=4)
+    qtds = round.(Int, 20 .* (precos ./ 100) .^ -1.2)
+    estoque = fill(50, 60)
+    zerar = findall(precos .== 80.0)[1:2:end]  # metade dos dias baratos sem estoque (venda zero censurada)
+    qtds[zerar] .= 0
+    estoque[zerar] .= 0
+    h = DataFrame(data=datas, quantidade=qtds, preco=precos, estoque=estoque)
+    p = Produto("Z", "z", 50.0, 100.0, 50, 0, -1.0)
+    @test isapprox(avaliar_elasticidade(p, h), -1.2; atol=0.05)
+    @test avaliar_elasticidade(p, select(h, Not(:estoque))) > -1.0  # sem a coluna, os zeros puxam a estimativa
+end
+
+@testset "PBKDF2-HMAC-SHA256 (RFC 7914)" begin
+    pbkdf2 = CoreSistemaInteligente.pbkdf2
+    @test bytes2hex(pbkdf2("password", Vector{UInt8}("salt"); iter=1)) ==
+          "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+    @test bytes2hex(pbkdf2("password", Vector{UInt8}("salt"); iter=2)) ==
+          "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
+    @test CoreSistemaInteligente.iguais_tempo_constante("abc", "abc")
+    @test !CoreSistemaInteligente.iguais_tempo_constante("abc", "abd")
+end

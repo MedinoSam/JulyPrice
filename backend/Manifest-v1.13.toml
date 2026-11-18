@@ -2,7 +2,7 @@
 
 julia_version = "1.13.3"
 manifest_format = "2.1"
-project_hash = "4fc1eeabd10723ee8b46576ed2c570a7d91bb55a"
+project_hash = "47f4747223bbbc4212a54d846ae6a518c6c25218"
 
 [[deps.ASL_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl"]
@@ -144,7 +144,7 @@ uuid = "d38c429a-6771-53c6-b99e-75d170b6e991"
 version = "0.6.3"
 
 [[deps.CoreSistemaInteligente]]
-deps = ["CSV", "DataFrames", "Dates", "HTTP", "HiGHS", "Ipopt", "JSON3", "JuMP", "LibPQ", "Plots", "Printf", "Random", "Statistics"]
+deps = ["CSV", "DataFrames", "Dates", "HTTP", "HiGHS", "Ipopt", "JSON3", "JuMP", "LibPQ", "Plots", "Printf", "Random", "SHA", "Statistics"]
 path = "."
 uuid = "eb4c9dd2-3eef-4563-8800-13629488d751"
 version = "0.1.0"

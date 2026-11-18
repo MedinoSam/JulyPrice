@@ -67,3 +67,74 @@ CREATE TABLE IF NOT EXISTS alertas (
     data_criacao TIMESTAMP NOT NULL DEFAULT now(),
     lido         BOOLEAN   NOT NULL DEFAULT false
 );
+
+-- =====================================================================
+-- Evoluções. Este arquivo é idempotente: a API o reaplica a cada subida,
+-- então bancos antigos ganham as colunas e tabelas novas sem recriar o volume.
+-- shortcut: sem controle de versão; trocar por migrações numeradas se surgir mudança destrutiva.
+-- =====================================================================
+
+-- Regras globais novas (0 desliga a regra correspondente)
+ALTER TABLE regras_negocio
+    ADD COLUMN IF NOT EXISTS dias_cooldown        BIGINT           NOT NULL DEFAULT 7    CHECK (dias_cooldown >= 0),
+    ADD COLUMN IF NOT EXISTS variacao_cooldown    DOUBLE PRECISION NOT NULL DEFAULT 0.05 CHECK (variacao_cooldown >= 0),
+    ADD COLUMN IF NOT EXISTS teto_padrao          DOUBLE PRECISION NOT NULL DEFAULT 0.30 CHECK (teto_padrao >= 0),
+    ADD COLUMN IF NOT EXISTS variacao_max_janela  DOUBLE PRECISION NOT NULL DEFAULT 0.15 CHECK (variacao_max_janela >= 0),
+    ADD COLUMN IF NOT EXISTS dias_janela_variacao BIGINT           NOT NULL DEFAULT 30   CHECK (dias_janela_variacao >= 1),
+    ADD COLUMN IF NOT EXISTS intervalo_motor_horas BIGINT          NOT NULL DEFAULT 0    CHECK (intervalo_motor_horas >= 0);
+
+-- Regra por categoria; sem linha, vale a global
+CREATE TABLE IF NOT EXISTS regras_categoria (
+    categoria               TEXT PRIMARY KEY,
+    limite_estoque_minimo   BIGINT           NOT NULL CHECK (limite_estoque_minimo >= 0),
+    limite_dias_inatividade BIGINT           NOT NULL CHECK (limite_dias_inatividade >= 0),
+    taxa_ajuste_alto        DOUBLE PRECISION NOT NULL CHECK (taxa_ajuste_alto >= 0),
+    taxa_ajuste_baixo       DOUBLE PRECISION NOT NULL CHECK (taxa_ajuste_baixo >= 0 AND taxa_ajuste_baixo < 1)
+);
+
+-- Preço de referência do teto padrão: o primeiro preço do produto (antes de qualquer ajuste)
+ALTER TABLE produtos ADD COLUMN IF NOT EXISTS preco_base DOUBLE PRECISION;
+UPDATE produtos p SET preco_base = COALESCE(
+    (SELECT a.preco_anterior FROM ajustes_preco a WHERE a.produto_id = p.id ORDER BY a.id LIMIT 1), p.preco)
+WHERE preco_base IS NULL;
+
+-- Estoque do dia (opcional): dia com estoque zero não entra na estimativa de elasticidade
+ALTER TABLE vendas ADD COLUMN IF NOT EXISTS estoque BIGINT CHECK (estoque >= 0);
+
+-- Descartado (pendente recusado) separado de Revertido (finalizado desfeito); auditoria da revisão
+ALTER TABLE ajustes_preco
+    ADD COLUMN IF NOT EXISTS revisado_por TEXT,
+    ADD COLUMN IF NOT EXISTS comentario   TEXT;
+ALTER TABLE ajustes_preco DROP CONSTRAINT IF EXISTS ajustes_preco_estado_check,
+    ADD CONSTRAINT ajustes_preco_estado_check
+    CHECK (estado IN ('NotificadoGerente', 'Finalizado', 'Revertido', 'Descartado'));
+CREATE INDEX IF NOT EXISTS ix_alertas_ajuste ON alertas (ajuste_id);
+CREATE INDEX IF NOT EXISTS ix_alertas_lido ON alertas (lido, data_criacao DESC);
+
+-- Usuários e sessões (cookie). Usuários são criados por backend/scripts/criar_usuario.jl.
+CREATE TABLE IF NOT EXISTS usuarios (
+    login      TEXT PRIMARY KEY,
+    nome       TEXT  NOT NULL,
+    perfil     TEXT  NOT NULL CHECK (perfil IN ('admin', 'gerente')),
+    senha_hash TEXT NOT NULL,   -- PBKDF2-HMAC-SHA256, hex
+    salt       TEXT NOT NULL    -- hex
+);
+CREATE TABLE IF NOT EXISTS sessoes (
+    token     TEXT PRIMARY KEY,   -- SHA-256 do token do cookie, hex (o token em si não fica no banco)
+    login     TEXT      NOT NULL REFERENCES usuarios(login) ON DELETE CASCADE,
+    expira_em TIMESTAMP NOT NULL
+);
+
+-- Histórico de execuções do motor
+CREATE TABLE IF NOT EXISTS execucoes_motor (
+    id         BIGSERIAL PRIMARY KEY,
+    origem     TEXT      NOT NULL CHECK (origem IN ('erp', 'manual', 'agenda')),
+    inicio     TIMESTAMP NOT NULL DEFAULT now(),
+    duracao_ms BIGINT,
+    normal     BIGINT,
+    ruptura    BIGINT,
+    encalhe    BIGINT,
+    ajustes    BIGINT,
+    suprimidas BIGINT,
+    erro       TEXT
+);

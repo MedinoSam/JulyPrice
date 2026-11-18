@@ -66,3 +66,52 @@ td.botoes { white-space: nowrap; display: flex; gap: 6px; }
 .paginacao { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end; margin-top: 10px; font-size: .85rem; color: var(--suave); }
 .paginacao span { margin: 0 6px; }
 button:disabled { opacity: .45; cursor: default; filter: none; }
+
+/* Sessão e cabeçalho */
+.quem { display: flex; gap: 8px; align-items: center; font-size: .9rem; }
+.quem small { opacity: .7; margin-left: 4px; }
+.quem button { background: transparent; color: #fff; border-color: #ffffff40; }
+.selo { display: inline-block; min-width: 18px; margin-left: 6px; padding: 0 5px; border-radius: 99px; font-size: .75rem;
+  background: var(--ruptura); color: #fff; }
+.login { max-width: 360px; margin: 48px auto; }
+.login form { display: flex; flex-direction: column; gap: 12px; }
+.login label { display: flex; flex-direction: column; gap: 4px; font-size: .85rem; color: var(--suave); }
+
+/* Filtros e ações em lote */
+select { font: inherit; padding: 6px 8px; border: 1px solid var(--borda); border-radius: 6px; background: #fff; }
+.filtros { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.filtros input[type=date] { width: auto; }
+label.inline { display: flex; gap: 4px; align-items: center; font-size: .85rem; color: var(--suave); }
+a.botao { font-size: .9rem; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--borda); background: #fff;
+  color: var(--texto); text-decoration: none; }
+.lote { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.lote input { flex: 1 1 260px; }
+input[type=checkbox] { width: auto; }
+.acoes { gap: 6px; }
+.card h3 { margin: 16px 0 8px; font-size: .95rem; }
+.simulacao { background: #eef4ff; padding: 10px 12px; border-radius: 6px; }
+.simulacao small { display: block; color: var(--suave); margin-top: 4px; }
+.tag.limite { background: var(--suave); }
+tr.naolido td:first-child { box-shadow: inset 3px 0 var(--primaria); }
+
+/* Indicadores */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.kpi { display: flex; flex-direction: column; gap: 2px; padding: 12px; border: 1px solid var(--borda); border-radius: 8px; }
+.kpi span, .kpi small { color: var(--suave); font-size: .8rem; }
+.kpi b { font-size: 1.5rem; font-variant-numeric: tabular-nums; }
+.legenda { display: flex; gap: 16px; font-size: .85rem; color: var(--suave); margin-bottom: 6px; }
+.legenda b { color: var(--texto); margin-left: 4px; }
+.amostra { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.amostra.ruptura, .seg.ruptura { background: var(--ruptura); fill: var(--ruptura); }
+.amostra.encalhe, .seg.encalhe { background: var(--encalhe); fill: var(--encalhe); }
+.grafico-barras { position: relative; }
+.grafico-barras svg { width: 100%; height: auto; display: block; }
+.eixo line { stroke: var(--borda); stroke-width: 1; }
+.eixo text { fill: var(--suave); font-size: 11px; font-variant-numeric: tabular-nums; }
+.alvo { fill: transparent; }
+g.apagada .seg { opacity: .35; }
+.dica { position: absolute; top: 0; transform: translateX(-50%); pointer-events: none; background: var(--card);
+  border: 1px solid var(--borda); border-radius: 6px; padding: 6px 8px; font-size: .8rem; display: flex;
+  flex-direction: column; gap: 2px; box-shadow: 0 2px 8px #0001; white-space: nowrap; }
+details { margin-top: 10px; font-size: .85rem; }
+summary { cursor: pointer; color: var(--suave); }

@@ -44,13 +44,23 @@ julia --project=backend -e 'using Pkg; Pkg.instantiate()'
 julia --project=backend backend/scripts/gerar_dataset.jl --n 200 --dias 90 --seed 42 --saida data --db
 ```
 
-4. API (porta 8080):
+4. API (porta 8080). A cada subida ela aplica `db/schema.sql`, que é idempotente. `JULYPRICE_ERP_TOKEN` é o segredo que o ERP manda no header `X-ERP-Token`; sem ele, as rotas do ERP ficam fechadas.
 
 ```bash
-julia --project=backend backend/server.jl
+JULYPRICE_ERP_TOKEN=troque-este-segredo julia --project=backend backend/server.jl
 ```
 
-5. Frontend (http://localhost:5173, faz proxy de `/api` para a 8080):
+5. Usuários do painel (com a API já tendo subido uma vez). A senha é pedida no terminal e precisa de 8 caracteres ou mais. O perfil `admin` vê tudo; o `gerente` não vê o Painel Administrativo.
+
+```bash
+julia --project=backend backend/scripts/criar_usuario.jl admin admin "Administrador"
+```
+
+```bash
+julia --project=backend backend/scripts/criar_usuario.jl gerente gerente "Gerente Comercial"
+```
+
+6. Frontend (http://localhost:5173, faz proxy de `/api` para a 8080):
 
 ```bash
 cd frontend && npm install && npm run dev
@@ -68,9 +78,9 @@ julia --project=backend backend/scripts/simulacao.jl data
 julia --project=backend -e 'using Pkg; Pkg.test()'
 ```
 
-Contrato do ERP: `GET /api/erp/precos-ajustados?desde=` recebe e devolve horários em UTC (ISO 8601; o `Z` é opcional no `desde`). Use o último `preco_alterado_em` recebido como próximo `desde`.
+Contrato do ERP: todas as rotas `/api/erp/*` exigem o header `X-ERP-Token`. Em `POST /api/erp/vendas-estoque`, cada venda pode trazer `estoque` do dia (opcional): dia com estoque zero não entra na estimativa de elasticidade. `GET /api/erp/precos-ajustados?desde=` recebe e devolve horários em UTC (ISO 8601; o `Z` é opcional no `desde`). Use o último `preco_alterado_em` recebido como próximo `desde`.
 
-Variáveis: `JULYPRICE_DATABASE_URL` (padrão `postgresql://julyprice:julyprice@localhost:5433/julyprice`), `PORT` (padrão 8080).
+Variáveis: `JULYPRICE_ERP_TOKEN`, `JULYPRICE_DATABASE_URL` (padrão `postgresql://julyprice:julyprice@localhost:5433/julyprice`), `PORT` (padrão 8080).
 
 ## Problemas comuns
 
