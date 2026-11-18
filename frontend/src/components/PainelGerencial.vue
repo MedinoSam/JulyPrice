@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { api, brl, pct, dataHora } from '../api.js'
+import { api, brl, pct, paraPct, dataHora } from '../api.js'
 import Paginacao from './Paginacao.vue'
 
 const produtos = ref([])
@@ -12,6 +12,9 @@ const selecionado = ref(null)
 const limites = ref(null)
 const erro = ref('')
 const msg = ref('')
+const ocupado = ref(false)  // evita clique duplo em aprovar/descartar/salvar
+const versao = ref(Date.now())  // muda a URL do gráfico a cada recarga
+const semGrafico = ref(false)
 
 const produtosFiltrados = computed(() => {
   const f = filtro.value.toLowerCase()
@@ -34,38 +37,43 @@ async function irAjustes(pagina) {
 
 async function carregar() {
   erro.value = ''
+  versao.value = Date.now()
+  semGrafico.value = false
   try { produtos.value = await api.get('/api/produtos') } catch (e) { erro.value = e.message }
   await Promise.all([irSugestoes(sugestoes.value.pagina), irAjustes(ajustes.value.pagina)])
 }
 
 async function revisar(id, acao) {
   msg.value = erro.value = ''
+  ocupado.value = true
   try {
     const r = await api.post(`/api/ajustes/${id}/${acao}`)
     msg.value = `Ajuste #${r.id}: ${r.estado}`
     await carregar()
-  } catch (e) { erro.value = e.message }
+  } catch (e) { erro.value = e.message } finally { ocupado.value = false }
 }
 
 function abrir(p) {
   selecionado.value = p
+  semGrafico.value = false
   // margem exibida em %
   limites.value = {
     preco_minimo: p.preco_minimo ?? Math.max(0.01, +(p.custo * 1.05).toFixed(2)),
     preco_maximo: p.preco_maximo ?? +(p.preco * 1.5).toFixed(2),
-    margem_desejada: (p.margem_desejada ?? 0) * 100,
+    margem_desejada: paraPct(p.margem_desejada ?? 0),
   }
 }
 
 async function salvarLimites() {
   msg.value = erro.value = ''
+  ocupado.value = true
   try {
     await api.put(`/api/produtos/${encodeURIComponent(selecionado.value.id)}/limites`, {
       ...limites.value, margem_desejada: limites.value.margem_desejada / 100,
     })
     msg.value = `Limites de ${selecionado.value.id} salvos.`
     await carregar()
-  } catch (e) { erro.value = e.message }
+  } catch (e) { erro.value = e.message } finally { ocupado.value = false }
 }
 
 onMounted(carregar)
@@ -92,8 +100,8 @@ onMounted(carregar)
             <td>{{ brl(s.preco_novo) }} <small>({{ pct(s.preco_novo / s.preco_anterior - 1) }})</small></td>
             <td class="mensagem">{{ s.alerta_mensagem }}</td>
             <td class="botoes">
-              <button class="primario" @click="revisar(s.id, 'aprovar')">Aprovar</button>
-              <button @click="revisar(s.id, 'reverter')">Descartar</button>
+              <button class="primario" :disabled="ocupado" @click="revisar(s.id, 'aprovar')">Aprovar</button>
+              <button :disabled="ocupado" @click="revisar(s.id, 'reverter')">Descartar</button>
             </td>
           </tr>
         </tbody>
@@ -140,10 +148,11 @@ onMounted(carregar)
       <label>Preço mínimo (R$) <input type="number" min="0.01" step="0.01" required v-model.number="limites.preco_minimo" /></label>
       <label>Preço máximo (R$) <input type="number" min="0.01" step="0.01" required v-model.number="limites.preco_maximo" /></label>
       <label>Margem desejada sobre custo (%) <input type="number" min="0" step="0.5" required v-model.number="limites.margem_desejada" /></label>
-      <div class="acoes"><button class="primario">Salvar limites</button></div>
+      <div class="acoes"><button class="primario" :disabled="ocupado">Salvar limites</button></div>
     </form>
-    <img class="grafico" :src="`/api/produtos/${encodeURIComponent(selecionado.id)}/grafico.svg`"
-         :alt="`Histórico de vendas e preço de ${selecionado.id}`" />
+    <p v-if="semGrafico" class="vazio">Sem histórico de vendas para este produto.</p>
+    <img v-else class="grafico" :src="`/api/produtos/${encodeURIComponent(selecionado.id)}/grafico.svg?v=${versao}`"
+         :alt="`Histórico de vendas e preço de ${selecionado.id}`" @error="semGrafico = true" />
   </section>
 
   <section class="card">
@@ -161,7 +170,7 @@ onMounted(carregar)
             <td>{{ brl(a.preco_anterior) }}</td>
             <td>{{ brl(a.preco_novo) }}</td>
             <td>{{ a.estado }}</td>
-            <td><button v-if="a.revertivel" @click="revisar(a.id, 'reverter')">Reverter</button></td>
+            <td><button v-if="a.revertivel" :disabled="ocupado" @click="revisar(a.id, 'reverter')">Reverter</button></td>
           </tr>
         </tbody>
       </table>

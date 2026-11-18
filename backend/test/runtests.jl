@@ -65,3 +65,35 @@ end
     @test res.preco_novo == [10.5, 9.0, 10.0]
     @test isempty(executar_ciclo(produtos[1:0, :], DataFrame(produto_id=String[]), R))
 end
+
+@testset "elasticidade com histórico esparso" begin
+    # determinístico: o fluxo do MersenneTwister muda entre versões do Julia
+    datas = Date(2026, 1, 1) .+ Day.(0:179)
+    precos = repeat([70.0, 85.0, 100.0, 115.0, 130.0, 90.0]; inner=7, outer=5)[1:180]
+    # Preço alto tem mais dias sem venda; o 1º dia de cada preço sempre vende (o preço dele fica conhecido)
+    sem_venda(i, p) = (i - 1) % 7 != 0 && (i % 3 == 0 || (p >= 115 && i % 3 == 1))
+    qtds = [sem_venda(i, p) ? 0 : round(Int, 20 * (p / 100)^-1.5) for (i, p) in enumerate(precos)]
+    qtds[end-19:end] .= 0  # 20 dias parado no fim
+    denso = DataFrame(data=datas, quantidade=qtds, preco=precos)
+    p = Produto("S", "s", 50.0, 100.0, 50, 180 - findlast(>(0), qtds), -1.0)  # dias desde a última venda
+    e = avaliar_elasticidade(p, denso)
+    @test e < -1.5  # os dias sem venda contam na média: mais elástico que a curva dos dias com venda
+    # ERP que omite os dias sem venda: mesma estimativa do histórico completo
+    @test avaliar_elasticidade(p, denso[denso.quantidade .> 0, :]) ≈ e
+    @test avaliar_elasticidade(p, denso[1:0, :]) == -1.0  # sem nenhuma venda: mantém a elasticidade
+end
+
+@testset "clamp em produto normal gera alerta informativo" begin
+    r = calcularNovoPreco(mk(), R, LimitePreco(110.0, 200.0, 0.0))
+    @test r.preco_novo == 110.0 && r.estados[end] == Finalizado
+    @test r.alerta.tipo == "LIMITE"
+end
+
+@testset "validação de campos JSON" begin
+    campo, ErroCliente = CoreSistemaInteligente.campo, CoreSistemaInteligente.ErroCliente
+    @test_throws ErroCliente campo(Dict(:x => true), :x, Float64)  # Bool não é número
+    @test campo(Dict(:x => 2), :x, Float64) === 2.0
+    @test campo(Dict(:c => nothing), :c, String, "") == ""
+    @test campo(Dict{Symbol,Any}(), :c, String, "") == ""
+    @test_throws ErroCliente campo(Dict(:c => 3), :c, String, "")
+end

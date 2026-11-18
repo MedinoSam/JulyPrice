@@ -1,20 +1,22 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { api } from '../api.js'
+import { api, paraPct } from '../api.js'
 
 // Taxas exibidas em %, gravadas como fração
 const form = ref(null)
 const msg = ref('')
 const erro = ref('')
 const ciclo = ref(null)
+const ocupado = ref(false)
 
 async function carregar() {
   const r = await api.get('/api/regras')
-  form.value = { ...r, taxa_ajuste_alto: r.taxa_ajuste_alto * 100, taxa_ajuste_baixo: r.taxa_ajuste_baixo * 100 }
+  form.value = { ...r, taxa_ajuste_alto: paraPct(r.taxa_ajuste_alto), taxa_ajuste_baixo: paraPct(r.taxa_ajuste_baixo) }
 }
 
 async function salvar() {
   msg.value = erro.value = ''
+  ocupado.value = true
   try {
     await api.put('/api/regras', {
       ...form.value,
@@ -22,12 +24,13 @@ async function salvar() {
       taxa_ajuste_baixo: form.value.taxa_ajuste_baixo / 100,
     })
     msg.value = 'Regras atualizadas.'
-  } catch (e) { erro.value = e.message }
+  } catch (e) { erro.value = e.message } finally { ocupado.value = false }
 }
 
 async function executar() {
   msg.value = erro.value = ''
-  try { ciclo.value = await api.post('/api/motor/executar') } catch (e) { erro.value = e.message }
+  ocupado.value = true
+  try { ciclo.value = await api.post('/api/motor/executar') } catch (e) { erro.value = e.message } finally { ocupado.value = false }
 }
 
 onMounted(() => carregar().catch((e) => (erro.value = e.message)))
@@ -51,14 +54,14 @@ onMounted(() => carregar().catch((e) => (erro.value = e.message)))
       <label>Redução em encalhe (%)
         <input type="number" min="0" max="99" step="0.1" required v-model.number="form.taxa_ajuste_baixo" />
       </label>
-      <div class="acoes"><button class="primario">Salvar regras</button></div>
+      <div class="acoes"><button class="primario" :disabled="ocupado">Salvar regras</button></div>
     </form>
   </section>
 
   <section class="card">
     <h2>Motor de precificação</h2>
     <p>O ciclo roda sozinho a cada carga do ERP. Use o botão para rodar agora com as regras atuais.</p>
-    <button class="primario" @click="executar">Executar ciclo</button>
+    <button class="primario" :disabled="ocupado" @click="executar">{{ ocupado ? 'Executando…' : 'Executar ciclo' }}</button>
     <p v-if="ciclo" class="resumo">
       Ruptura: <b>{{ ciclo.ruptura }}</b> · Encalhe: <b>{{ ciclo.encalhe }}</b> ·
       Normal: <b>{{ ciclo.normal }}</b> · Ajustes registrados: <b>{{ ciclo.ajustes }}</b>

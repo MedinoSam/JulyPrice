@@ -11,7 +11,7 @@ corpo(req) = try
 catch
     throw(ErroCliente(400, "JSON inválido"))
 end
-param(req, k) = HTTP.getparams(req)[k]
+param(req, k) = HTTP.URIs.unescapeuri(HTTP.getparams(req)[k])  # o Router não decodifica variáveis de caminho
 
 # ?pagina=1&por_pagina=20 (máximo 100); valor não numérico vira 400 via ArgumentError
 function paginacao(req)
@@ -22,9 +22,14 @@ end
 function rota(f)
     function (req)
         try
-            lock(() -> f(req), DB_LOCK)
+            lock(DB_LOCK) do
+                # Conexão caiu (ex.: Postgres reiniciou): tenta reconectar antes de atender
+                LibPQ.status(DB[]) == LibPQ.libpq_c.CONNECTION_OK || LibPQ.reset!(DB[]; throw_error=false)
+                f(req)
+            end
         catch e
             e isa ErroCliente && return json((erro=e.msg,); status=e.status)
+            LibPQ.status(DB[]) == LibPQ.libpq_c.CONNECTION_OK || return json((erro="banco de dados indisponível",); status=503)
             e isa Union{ArgumentError,LibPQ.Errors.PQResultError} && return json((erro=sprint(showerror, e),); status=400)
             @error "erro interno" exception = (e, catch_backtrace())
             json((erro="erro interno",); status=500)
@@ -42,6 +47,8 @@ end
 function registrar_rotas()
     r = HTTP.Router()
     reg(metodo, caminho, f) = HTTP.register!(r, metodo, caminho, rota(f))
+
+    reg("GET", "/api/saude", _ -> (execute(DB[], "SELECT 1"); json((status="ok",))))
 
     # --- Painel Gerencial ---
     reg("GET", "/api/produtos", _ -> json(linhas(consulta(DB[], """
@@ -85,7 +92,8 @@ function registrar_rotas()
     end)
     reg("GET", "/api/erp/precos-ajustados", req -> begin
         q = HTTP.queryparams(HTTP.URI(req.target))
-        desde = haskey(q, "desde") ? DateTime(q["desde"]) : DateTime(1970)
+        # `desde` em UTC (ISO 8601); aceita o `Z` que a própria API devolve
+        desde = haskey(q, "desde") ? DateTime(chopsuffix(q["desde"], "Z")) : DateTime(1970)
         json(listar_precos_ajustados(DB[], desde))
     end)
     r

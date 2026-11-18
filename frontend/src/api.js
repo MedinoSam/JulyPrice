@@ -16,5 +16,7 @@ export const api = {
 }
 
 export const brl = (v) => (v == null ? '—' : v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }))
+// fração → % sem lixo de ponto flutuante (0.07 * 100 = 7.000000000000001 quebra o `step` dos inputs)
+export const paraPct = (v) => +(v * 100).toFixed(2)
 export const pct = (v) => (v == null ? '—' : `${v > 0 ? '+' : ''}${(v * 100).toFixed(1)}%`)
 export const dataHora = (s) => (s ? new Date(s).toLocaleString('pt-BR') : '—')

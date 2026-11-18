@@ -30,11 +30,25 @@ function estimar_elasticidade(precos::AbstractVector, quantidades::AbstractVecto
     is_solved_and_feasible(m) ? value(b) : padrao
 end
 
-# `historico`: data, quantidade, preco. Os últimos `dias_parado` dias (sem venda) refletem encalhe, não preço.
+# `historico`: data, quantidade, preco. Os últimos `dias_parado` dias refletem encalhe, não preço, e ficam de fora.
+# O ERP pode omitir dias sem venda: o corte é por data (nunca antes da última venda) e o calendário é
+# completado com venda zero ao último preço conhecido.
 function avaliar_elasticidade(p::Produto, historico)
     h = sort(historico, :data)
-    h = h[1:max(0, nrow(h) - p.dias_parado), :]
-    estimar_elasticidade(h.preco, h.quantidade; padrao=p.elasticidade)
+    ultima = findlast(>(0), h.quantidade)
+    ultima === nothing && return p.elasticidade
+    dias = collect(h.data[1]:Day(1):max(h.data[ultima], h.data[end] - Day(p.dias_parado)))
+    precos, qtds = similar(dias, Float64), zeros(Int, length(dias))
+    j = 1
+    for (i, d) in enumerate(dias)
+        if h.data[j] == d
+            precos[i], qtds[i] = h.preco[j], h.quantidade[j]
+            j += 1
+        else
+            precos[i] = precos[i-1]  # dia 1 sempre existe no histórico
+        end
+    end
+    estimar_elasticidade(precos, qtds; padrao=p.elasticidade)
 end
 
 """
@@ -92,6 +106,11 @@ function disparar_alerta(p::Produto, risco::Symbol, preco_novo::Float64)
     Alerta(risco == :ruptura ? "RUPTURA" : "ENCALHE", msg, now())
 end
 
+# Produto normal fora dos limites: o clamp corrige o preço sem passar pelo gerente, então só informa.
+alerta_clamp(p::Produto, preco_novo::Float64) =
+    Alerta("LIMITE", @sprintf("Preço R\$ %.2f fora dos limites do produto; ajustado para R\$ %.2f (%s).",
+                              p.preco, preco_novo, pct(preco_novo / p.preco - 1)), now())
+
 """
 Executa a máquina de estados para um produto:
 EmAnalise → AvaliadoRuptura | AvaliadoEncalhe | AvaliadoNormal → ValidadoClamp → NotificadoGerente | Finalizado
@@ -103,8 +122,8 @@ function calcularNovoPreco(p::Produto, r::RegraNegocio, l::LimitePreco=SEM_LIMIT
     bruto = calcular_preco(p, r, risco)
     novo = aplicar_clamp(bruto, p, l)
     push!(estados, ValidadoClamp)
-    alerta = risco == :normal ? nothing : disparar_alerta(p, risco, novo)
-    push!(estados, alerta === nothing ? Finalizado : NotificadoGerente)
+    alerta = risco != :normal ? disparar_alerta(p, risco, novo) : novo != p.preco ? alerta_clamp(p, novo) : nothing
+    push!(estados, risco == :normal ? Finalizado : NotificadoGerente)
     ResultadoAnalise(p.id, risco, estados, p.preco, bruto, novo, alerta)
 end
 

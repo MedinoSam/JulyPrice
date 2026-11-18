@@ -68,6 +68,8 @@ julia --project=backend backend/scripts/simulacao.jl data
 julia --project=backend -e 'using Pkg; Pkg.test()'
 ```
 
+Contrato do ERP: `GET /api/erp/precos-ajustados?desde=` recebe e devolve horários em UTC (ISO 8601; o `Z` é opcional no `desde`). Use o último `preco_alterado_em` recebido como próximo `desde`.
+
 Variáveis: `JULYPRICE_DATABASE_URL` (padrão `postgresql://julyprice:julyprice@localhost:5433/julyprice`), `PORT` (padrão 8080).
 
 ## Problemas comuns

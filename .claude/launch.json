@@ -11,6 +11,15 @@
         "dev"
       ],
       "port": 5173
+    },
+    {
+      "name": "api",
+      "runtimeExecutable": "julia",
+      "runtimeArgs": [
+        "--project=backend",
+        "backend/server.jl"
+      ],
+      "port": 8080
     }
   ]
 }

@@ -9,7 +9,8 @@ const DATABASE_URL_PADRAO = "postgresql://julyprice:julyprice@localhost:5433/jul
 conectar() = LibPQ.Connection(get(ENV, "JULYPRICE_DATABASE_URL", DATABASE_URL_PADRAO))
 
 consulta(conn, sql, params=[]) = DataFrame(execute(conn, sql, params))
-linhas(df::DataFrame) = [NamedTuple(r) for r in eachrow(df)]
+# TIMESTAMP do banco está em UTC (sessão do LibPQ): sai com `Z` para o cliente não ler como hora local.
+linhas(df::DataFrame) = [map(v -> v isa DateTime ? string(v, "Z") : v, NamedTuple(r)) for r in eachrow(df)]
 
 function transacao(f, conn)
     execute(conn, "BEGIN")
@@ -27,12 +28,15 @@ end
 function campo(o, k::Symbol, ::Type{T}) where {T}
     v = o isa AbstractDict ? get(o, k, nothing) : nothing
     try
-        T <: Real && v isa Real && return convert(T, v)
+        T <: Real && v isa Real && !(v isa Bool) && return convert(T, v)  # Bool <: Real no Julia
         T <: AbstractString && v isa AbstractString && return String(v)
     catch
     end
     throw(ErroCliente(400, "campo '$k' ausente ou inválido (esperado $T)"))
 end
+
+# Campo opcional: ausente ou null vira `padrao`.
+campo(o, k::Symbol, T::Type, padrao) = o isa AbstractDict && get(o, k, nothing) === nothing ? padrao : campo(o, k, T)
 
 # ---------- Gestão de Regras (Administrador) ----------
 
@@ -42,6 +46,10 @@ function carregar_regra(conn)
 end
 
 function atualizar_regras(conn, r::RegraNegocio)
+    r.limite_estoque_minimo >= 0 && r.limite_dias_inatividade >= 0 ||
+        throw(ErroCliente(400, "estoque mínimo e dias de inatividade devem ser >= 0"))
+    r.taxa_ajuste_alto >= 0 || throw(ErroCliente(400, "taxa_ajuste_alto deve ser >= 0"))
+    0 <= r.taxa_ajuste_baixo < 1 || throw(ErroCliente(400, "taxa_ajuste_baixo deve estar em [0, 1)"))
     execute(conn, """UPDATE regras_negocio SET limite_estoque_minimo=\$1, limite_dias_inatividade=\$2,
                      taxa_ajuste_alto=\$3, taxa_ajuste_baixo=\$4, atualizado_em=now() WHERE id = 1""",
             Any[r.limite_estoque_minimo, r.limite_dias_inatividade, r.taxa_ajuste_alto, r.taxa_ajuste_baixo])  # Any: evita promover Int para Float
@@ -53,6 +61,8 @@ end
 function definir_limites(conn, produto_id::String, l::LimitePreco)
     l.preco_maximo >= l.preco_minimo > 0 || throw(ErroCliente(400, "exige 0 < preco_minimo <= preco_maximo"))
     l.margem_desejada >= 0 || throw(ErroCliente(400, "margem_desejada deve ser >= 0"))
+    isempty(consulta(conn, "SELECT 1 FROM produtos WHERE id = \$1", [produto_id])) &&
+        throw(ErroCliente(404, "produto $produto_id não encontrado"))
     execute(conn, """INSERT INTO limites_preco VALUES (\$1,\$2,\$3,\$4)
                      ON CONFLICT (produto_id) DO UPDATE SET preco_minimo=EXCLUDED.preco_minimo,
                      preco_maximo=EXCLUDED.preco_maximo, margem_desejada=EXCLUDED.margem_desejada""",
@@ -74,11 +84,13 @@ ver_sugestoes_e_alertas(conn, pagina::Int, por_pagina::Int) = paginar(conn, """
     LEFT JOIN alertas al ON al.ajuste_id = a.id
     WHERE a.estado = 'NotificadoGerente' ORDER BY a.criado_em DESC, a.id DESC""", pagina, por_pagina)
 
-# `revertivel`: só o ajuste finalizado mais recente de cada produto pode ser revertido.
+# `revertivel`: mesmas regras de `revisar_ajustes` — finalizado mais recente do produto, sem pendente,
+# e não feito pelo clamp de limites (risco normal), que o próximo ciclo reaplicaria.
 listar_ajustes(conn, pagina::Int, por_pagina::Int) = paginar(conn, """
     SELECT a.*, p.nome,
-           (a.estado = 'Finalizado' AND NOT EXISTS (SELECT 1 FROM ajustes_preco b WHERE b.produto_id = a.produto_id
-                                                    AND b.id > a.id AND b.estado = 'Finalizado')) AS revertivel
+           (a.estado = 'Finalizado' AND a.risco <> 'normal'
+            AND NOT EXISTS (SELECT 1 FROM ajustes_preco b WHERE b.produto_id = a.produto_id
+                            AND ((b.id > a.id AND b.estado = 'Finalizado') OR b.estado = 'NotificadoGerente'))) AS revertivel
     FROM ajustes_preco a JOIN produtos p ON p.id = a.produto_id
     ORDER BY a.criado_em DESC, a.id DESC""", pagina, por_pagina)
 
@@ -93,11 +105,19 @@ function revisar_ajustes(conn, ajuste_id::Int, acao::Symbol)
         a = first(eachrow(df))
         if acao == :aprovar
             a.estado == "NotificadoGerente" || throw(ErroCliente(409, "só ajustes pendentes podem ser aprovados"))
+            atual = only(consulta(conn, "SELECT preco FROM produtos WHERE id = \$1 FOR UPDATE", [a.produto_id]).preco)
+            atual == a.preco_anterior ||
+                throw(ErroCliente(409, "o preço do produto mudou desde a sugestão; descarte-a e rode o motor de novo"))
             enviar_precos_ajustados(conn, a.produto_id, a.preco_novo)
             novo_estado = "Finalizado"
         else
             a.estado == "Revertido" && throw(ErroCliente(409, "ajuste já revertido"))
             if a.estado == "Finalizado"
+                a.risco == "normal" &&
+                    throw(ErroCliente(409, "ajuste feito pelos limites do produto; altere os limites em vez de reverter"))
+                pendente = consulta(conn, "SELECT 1 FROM ajustes_preco WHERE produto_id=\$1 AND estado = 'NotificadoGerente'",
+                                    [a.produto_id])
+                isempty(pendente) || throw(ErroCliente(409, "há sugestão pendente para o produto; revise-a primeiro"))
                 mais_novo = consulta(conn, """SELECT 1 FROM ajustes_preco WHERE produto_id=\$1 AND id > \$2
                                               AND estado = 'Finalizado'""", [a.produto_id, ajuste_id])
                 isempty(mais_novo) || throw(ErroCliente(409, "existe ajuste mais recente; reverta-o primeiro"))
@@ -129,7 +149,7 @@ function receber_vendas_e_estoque(conn, payload)
                              VALUES (\$1,\$2,\$3,\$4,\$5,\$6,\$7)
                              ON CONFLICT (id) DO UPDATE SET nome=EXCLUDED.nome, categoria=EXCLUDED.categoria,
                              custo=EXCLUDED.custo, estoque=EXCLUDED.estoque, dias_parado=EXCLUDED.dias_parado""",
-                    [campo(p, :id, String), campo(p, :nome, String), String(get(p, :categoria, "")),
+                    [campo(p, :id, String), campo(p, :nome, String), campo(p, :categoria, String, ""),
                      campo(p, :custo, Float64), campo(p, :preco, Float64),
                      campo(p, :estoque, Int64), campo(p, :dias_parado, Int64)])
         end
@@ -143,13 +163,15 @@ function receber_vendas_e_estoque(conn, payload)
     (produtos=length(produtos), vendas=length(vendas))
 end
 
-# Grava o preço final; o ERP o recebe pelo GET /api/erp/precos-ajustados.
+# Grava o preço final; o ERP o recebe pelo GET /api/erp/precos-ajustados. Preço igual não conta como alteração.
 enviar_precos_ajustados(conn, produto_id::String, novo_preco::Float64) =
-    execute(conn, "UPDATE produtos SET preco=\$1, preco_alterado_em=now() WHERE id=\$2", [novo_preco, produto_id])
+    execute(conn, "UPDATE produtos SET preco=\$1, preco_alterado_em=now() WHERE id=\$2 AND preco <> \$1",
+            [novo_preco, produto_id])
 
+# O banco guarda microssegundos e o DateTime do Julia, milissegundos: sem truncar, o cursor `desde` repetiria itens.
 listar_precos_ajustados(conn, desde::DateTime) =
     linhas(consulta(conn, """SELECT id AS produto_id, preco, preco_alterado_em FROM produtos
-                             WHERE preco_alterado_em > \$1 ORDER BY preco_alterado_em""", [desde]))
+                             WHERE date_trunc('milliseconds', preco_alterado_em) > \$1 ORDER BY preco_alterado_em""", [desde]))
 
 # ---------- Ciclo do Motor ----------
 
@@ -160,7 +182,8 @@ function executar_motor(conn)
                                  WHERE NOT EXISTS (SELECT 1 FROM ajustes_preco a
                                                    WHERE a.produto_id = p.id AND a.estado = 'NotificadoGerente')""")
     vendas = consulta(conn, "SELECT produto_id, data, quantidade, preco FROM vendas")
-    limites = Dict(r.produto_id => LimitePreco(r.preco_minimo, r.preco_maximo, r.margem_desejada)
+    # tipado: com a tabela vazia, o gerador daria Dict{Any,Any} e executar_ciclo recusaria
+    limites = Dict{String,LimitePreco}(r.produto_id => LimitePreco(r.preco_minimo, r.preco_maximo, r.margem_desejada)
                    for r in eachrow(consulta(conn, "SELECT * FROM limites_preco")))
     res = executar_ciclo(produtos, vendas, regra, limites)
     contagem = Dict("normal" => 0, "ruptura" => 0, "encalhe" => 0, "ajustes" => 0)
@@ -176,12 +199,10 @@ function executar_motor(conn)
                                         RETURNING id""",
                                [r.produto_id, string(r.risco), string(r.estado_final), r.preco_anterior,
                                 r.preco_calculado, r.preco_novo, r.elasticidade]).id)
-            if r.estado_final == Finalizado
-                enviar_precos_ajustados(conn, r.produto_id, r.preco_novo)
-            else
+            r.estado_final == Finalizado && enviar_precos_ajustados(conn, r.produto_id, r.preco_novo)
+            ismissing(r.alerta_tipo) ||
                 execute(conn, "INSERT INTO alertas (produto_id, ajuste_id, tipo, mensagem) VALUES (\$1,\$2,\$3,\$4)",
                         [r.produto_id, id, r.alerta_tipo, r.alerta_mensagem])
-            end
         end
     end
     contagem
